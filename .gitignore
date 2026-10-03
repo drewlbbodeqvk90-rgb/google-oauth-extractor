@@ -1,1 +1,9 @@
 output_tokens/
+
+# zipapp build output (the recipe — build_pyz.py / pyz/__main__.py — is tracked)
+build/
+dist/
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]

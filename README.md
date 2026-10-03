@@ -176,6 +176,11 @@ python token_to_session.py victims/PH_112.201.133.55/token_01.txt
 ├── extract_tokens_windows.py         # Live extraction script (Windows only)
 ├── test_token.py                     # Token validation + post-exploitation (any OS)
 ├── token_to_session.py               # Cookie-swap: token -> browser session
+├── build_pyz.py                      # Reproducible .pyz build (stdlib zipapp)
+├── pyz/
+│   └── __main__.py                   # zipapp entry point: extract/test/session dispatcher
+├── dist/
+│   └── google_oauth_extractor.pyz    # Build output (gitignored)
 └── docs/
     ├── TOKEN_EXTRACTION_WINDOWS.md   # Full extraction methodology (live + offline)
     ├── TOKEN_BINDING_REALITY.md      # Token binding myths debunked
@@ -183,6 +188,40 @@ python token_to_session.py victims/PH_112.201.133.55/token_01.txt
     ├── google-oauth-tokens-tutorial.md    # Comprehensive OAuth exploitation tutorial
     └── google-oauth-tokens-validation.md  # Analysis of leaked tokens (reference)
 ```
+
+---
+
+## Packaging the Toolkit as a Single `.pyz`
+
+The three scripts ship as one Python zipapp — a zip archive with a shebang that
+CPython executes directly. See
+[`docs/PACKAGING_PYTHON_CLI.md`](docs/PACKAGING_PYTHON_CLI.md) §7 for the
+rationale: the target machine already has Python, so no freezer is needed and
+there are zero build dependencies.
+
+```bash
+python build_pyz.py                    # -> dist/google_oauth_extractor.pyz
+python build_pyz.py --compressed       # smaller archive, slightly slower start
+python build_pyz.py -o out/tool.pyz    # custom output path
+```
+
+The archive bundles a single entry point (`pyz/__main__.py`) that dispatches the
+three scripts as subcommands:
+
+```bash
+py dist/google_oauth_extractor.pyz --help
+py dist/google_oauth_extractor.pyz extract --all-browsers
+py dist/google_oauth_extractor.pyz test victims/PH_112.201.133.55/
+py dist/google_oauth_extractor.pyz session victims/PH_112.201.133.55/token_01.txt
+```
+
+- **Standalone usage is unchanged** — `python test_token.py ...` still works.
+  The dispatcher strips the subcommand from `sys.argv` before delegating, so
+  each script keeps its own argument parsing verbatim.
+- **Dependencies are not bundled.** A plain `zipapp` archives only this
+  project's source; run `pip install -r requirements.txt` on the target first.
+- **`dist/` and `build/` are gitignored** — commit the recipe
+  (`build_pyz.py`, `pyz/__main__.py`), not the artifact.
 
 ---
 
