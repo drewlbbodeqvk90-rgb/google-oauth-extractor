@@ -24,7 +24,7 @@ pip install -r requirements.txt
 ```
 
 - Python 3.6+
-- **Windows only:** `pycryptodome`, `pypiwin32` (for live extraction with `extract_tokens_windows.py`)
+- **Windows only:** `pycryptodome`, `pywin32` (for live extraction with `extract_tokens_windows.py`). Both are pre-declared in `requirements.txt` behind a `sys_platform == "win32"` marker, so a plain `pip install -r requirements.txt` is enough on Windows.
 - **Any OS:** `requests` (for token validation, cookie-swap, post-exploitation)
 - Residential HTTP proxy matching the victim's country (for live testing)
 

