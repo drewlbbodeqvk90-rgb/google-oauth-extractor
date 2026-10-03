@@ -14,10 +14,17 @@ Every Chromium browser stores OAuth tokens in a SQLite database called **Web Dat
 | **Chrome** | `%LOCALAPPDATA%\Google\Chrome\User Data\<Profile>\Web Data` |
 | **Edge** | `%LOCALAPPDATA%\Microsoft\Edge\User Data\<Profile>\Web Data` |
 | **Brave** | `%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data\<Profile>\Web Data` |
-| **Opera** | `%APPDATA%\Opera Software\Opera Stable\Web Data` |
 | **Vivaldi** | `%LOCALAPPDATA%\Vivaldi\User Data\<Profile>\Web Data` |
+| **Yandex** | `%LOCALAPPDATA%\Yandex\YandexBrowser\User Data\<Profile>\Web Data` |
+| **Opera** | `%APPDATA%\Opera Software\Opera Stable\Web Data` |
 
 Profiles include `Default`, `Profile 1`, `Profile 3`, `Guest Profile`, etc. Each profile corresponds to a different browser user (and typically a different Google account).
+
+> **Opera is the outlier:** it stores its profile under `%APPDATA%` (Roaming)
+> rather than `%LOCALAPPDATA%`, and keeps the primary profile — and therefore
+> `Web Data` — directly in the `Opera Stable` folder instead of a `Default\`
+> subdirectory. `extract_tokens_windows.py` therefore scans the user-data root
+> as well as the usual `Default` / `Profile N` subdirectories.
 
 ### The Database Table
 
@@ -25,7 +32,7 @@ Profiles include `Default`, `Profile 1`, `Profile 3`, `Guest Profile`, etc. Each
 -- Inside Web Data, the target table is: token_service
 -- Columns on modern Chromium (Chrome/Edge/Brave 80+):
 --   service             TEXT     (e.g. "https://accounts.google.com/OAuth2Login/GAIA_SID")
---   encrypted_token     BLOB     (AES-256-GCM encrypted, 12B nonce + ciphertext + 16B tag)
+--   encrypted_token     BLOB     (AES-256-GCM, optional vXX prefix + 12B nonce + ciphertext + 16B tag)
 --   binding_key         BLOB     (optional, token-binding key)
 --   mtls_token_binding  INTEGER  (optional)
 --
@@ -59,6 +66,38 @@ The DPAPI wrapping ties the key to:
 - The **logged-in Windows user's SID**
 - The **Windows login password** (or a hash of it)
 - The **machine's domain/workgroup context**
+
+### Layer 2: App-Bound Encryption (Chrome 127+)
+
+> **This is the layer DPAPI alone cannot defeat.**
+
+Starting with **Chrome 127** (July 2024), Google added **App-Bound Encryption
+(ABE)**. Instead of trusting *any* process running as the logged-in user, the
+AES key is wrapped a second time by a privileged service that embeds the
+requesting application's identity into the ciphertext and re-verifies it on
+decrypt. Another program asking for the same key simply fails.
+
+| Signal | Meaning |
+|--------|---------|
+| `os_crypt.app_bound_encrypted_key` in `Local State` | An ABE-wrapped key exists for this profile |
+| Value prefixed `v20` | This value is ABE-protected — DPAPI will not open it |
+| Value prefixed `v10` / `v11` | Classic scheme — still decrypts with the DPAPI key |
+| Chrome **event ID 257** (Application log) | An ABE verification failure was logged |
+
+Because ABE binds the key to the machine *and* the requesting app, running the
+extractor as the logged-in user is **not** enough, and it breaks by design where
+profiles roam between machines. Google's announcement states cookies were
+migrated first, with passwords, payment data and "other persistent
+authentication tokens" to follow — so whether `token_service` rows come back as
+`v20` depends on the browser build.
+
+`extract_tokens_windows.py` handles this explicitly: it warns when
+`app_bound_encrypted_key` is present, still decrypts `v10` values with the
+classic key, and reports `v20` rows as **"App-Bound Encrypted (v20) - skipped"**
+instead of the misleading `MAC check failed` a blind `CryptUnprotectData`
+attempt would otherwise produce.
+
+> 📖 Background: [Improving the security of Chrome cookies on Windows](https://security.googleblog.com/2024/07/improving-security-of-chrome-cookies-on.html)
 
 ## 3. Extraction Steps (Live Access)
 
@@ -185,6 +224,8 @@ This requires the actual Windows password, not just a hash. NTLM hash won't work
 | DPAPI: `Key not found` | Running as a different Windows user | Must run as the same user that owns the Chrome profile |
 | DPAPI: `Bad data` | Wrong `Local State` file or corrupted | Check `encrypted_key` is valid base64 and starts with `DPAPI` prefix |
 | AES-GCM: `MAC check failed` | Wrong master key, corrupted ciphertext, or Chrome version mismatch | Verify master key is 32 bytes after unwrapping |
+| `App-Bound Encrypted (v20) - skipped` | Value is protected by App-Bound Encryption (Chrome 127+) | Not defeatable with DPAPI — needs the browser's elevation service. Target an older build, or accept the loss. |
+| `App-Bound Encryption present` (warning only) | `Local State` carries `app_bound_encrypted_key` | Informational: `v10` rows still extract; only `v20` rows are skipped |
 
 ---
 

