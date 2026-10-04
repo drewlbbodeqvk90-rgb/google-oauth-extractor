@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Google OAuth Token Extractor Toolkit — single-file zipapp entry point.
 
-This module is the archive root of ``google_oauth_extractor.pyz``. It bundles
+This module is the archive root of ``goe.pyz``. It bundles
 the toolkit's three scripts behind one command with subcommands, so the whole
 project ships as a single ``.pyz`` file::
 
-    py google_oauth_extractor.pyz extract [options]   # extract_tokens_windows.py
-    py google_oauth_extractor.pyz test <args>         # test_token.py
-    py google_oauth_extractor.pyz session <args>      # token_to_session.py
+    py goe.pyz extract [options]   # extract_tokens_windows.py
+    py goe.pyz test <args>         # test_token.py
+    py goe.pyz session <args>      # token_to_session.py
 
 Each command is imported lazily and the subcommand token is stripped from
 ``sys.argv`` before the target module's own ``main()`` runs, so every script
@@ -45,7 +45,7 @@ COMMANDS = {
 
 def _prog():
     """Name to show in usage/help text, derived from how we were invoked."""
-    return os.path.basename(sys.argv[0]) or "google_oauth_extractor.pyz"
+    return os.path.basename(sys.argv[0]) or "goe.pyz"
 
 
 def print_usage(stream=sys.stdout):
@@ -83,7 +83,7 @@ def main(argv=None):
         return 0 if argv else 1
 
     if argv[0] in ("-V", "--version", "version"):
-        print(f"google_oauth_extractor {VERSION}")
+        print(f"goe {VERSION}")
         return 0
 
     command = argv[0]

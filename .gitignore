@@ -7,3 +7,6 @@ dist/
 # Python bytecode caches
 __pycache__/
 *.py[cod]
+
+# Pinned build environment for the PyInstaller .exe
+.venv-build/

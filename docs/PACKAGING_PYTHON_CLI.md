@@ -298,9 +298,13 @@ PyInstaller or Nuitka. Build on (or CI on) every platform you intend to ship.
 GitHub Actions' `windows-latest` / `macos-latest` / `ubuntu-latest` matrix is
 the standard answer.
 
-**Code signing (Windows).** An unsigned binary triggers SmartScreen
-"unrecognised app" warnings, and signing is what actually fixes that — not
-compression tweaks. You need an Authenticode certificate and `signtool`:
+**Code signing (Windows).** SmartScreen's "unrecognised app" warning is driven
+by **Mark-of-the-Web**, not by being unsigned per se. A binary you just built
+locally has no MOTW and will normally run without a prompt — which is why the
+warning appears for the *recipient* but not for the developer. A binary that
+arrived by download, email attachment, or network share does carry MOTW, and an
+unsigned, zero-reputation one will prompt. Signing is what actually fixes that —
+not compression tweaks. You need an Authenticode certificate and `signtool`:
 
 ```bat
 signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 mytool.exe
@@ -317,7 +321,74 @@ committing the `.spec` or `setup.py` that reproduces the build.
 
 ---
 
-## 10. Verifying the artifact
+## 10. Windows trust: MOTW, SmartScreen and Smart App Control
+
+Before picking between a freezer and `zipapp`, know that on Windows *"will this
+run?"* is decided by **three separate mechanisms**, and they do not care about
+the same things.
+
+### Mark-of-the-Web → SmartScreen
+
+When a file arrives from the internet — browser download, email attachment, a
+UNC/network path, or a zip extracted from one — Windows attaches a
+`Zone.Identifier` alternate data stream. That is the Mark-of-the-Web (MOTW).
+
+**SmartScreen is driven by MOTW, not by being unsigned.** A binary you just
+built locally has no MOTW, so SmartScreen never evaluates it and it runs with
+no prompt. The *same* binary, once it reaches someone else by download, does
+carry MOTW — and an unsigned binary with no reputation gets the full-screen
+"Windows protected your PC" dialog.
+
+```powershell
+# Does this file carry MOTW?  (only ':$DATA' => no MOTW)
+Get-Item .\mytool.exe -Stream *
+
+# Strip MOTW — same as the Properties -> Unblock checkbox
+Unblock-File .\mytool.exe
+```
+
+This is the classic *works for the developer, warns for the recipient* split. It
+is expected behaviour, not a sign your build is broken.
+
+### Smart App Control — applies to local builds too
+
+SAC is the exception to everything above: it evaluates **every** application
+image, MOTW or not, including one you compiled on the machine yourself. It
+weighs the image against Microsoft's reputation service and blocks what it
+cannot vouch for.
+
+```
+HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy
+    VerifiedAndReputablePolicyState    0 = off,  1 = enforced,  2 = evaluation
+```
+
+In **evaluation** mode it observes and allows; in **enforced** mode an unsigned,
+unknown `.exe` is simply blocked. Signing the binary — or turning SAC off — is
+the only way through.
+
+### Why a `.pyz` sidesteps both
+
+A `.pyz` is not a PE image. It is a zip archive passed as an *argument* to
+`python.exe`, so the executable Windows evaluates and reputation-checks is the
+**signed, well-known interpreter**, not your artifact:
+
+- **SmartScreen** — the launched image is `python.exe` (validly signed by the
+  Python Software Foundation, or by Microsoft for a Store install), which has
+  reputation. The archive is data.
+- **Smart App Control** — same story: the image subject to code-integrity
+  evaluation is the signed interpreter, so it is allowed.
+- **Antivirus** — no PyInstaller bootloader and no self-extraction into
+  `%TEMP%`, which are precisely the behaviours heuristics associate with
+  "extract-and-execute".
+
+Two caveats. First, this only holds if the target's interpreter is itself a
+signed, reputable build — ship a hacked-together portable `python.exe` and you
+have recreated the problem. Second, `.pyz` is a plain zip: the trust advantage
+is about *launching*, not about hiding code (section 7).
+
+---
+
+## 11. Verifying the artifact
 
 The golden rule: **test the artifact, not the source tree.** A build that runs
 from `python tool.py` tells you almost nothing about `dist/tool.exe`.
