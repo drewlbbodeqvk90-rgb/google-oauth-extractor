@@ -271,6 +271,47 @@ Details that matter:
   freezers automate, and the reason to prefer them unless you specifically
   need the control.
 
+### Real-world notes (from the `goe` portable bundle)
+
+The embeddable distribution is **more complete than it looks** and easier to use
+than its reputation suggests:
+
+- **The stdlib it needs is present.** The zip ships `_sqlite3.pyd` *and*
+  `sqlite3.dll`, `_ssl.pyd` with `libssl-3.dll`/`libcrypto-3.dll`, `_socket.pyd`,
+  `select.pyd`, `_hashlib.pyd` and `unicodedata.pyd`, so a `sqlite3` + HTTPS
+  workload runs out of the box — no manually dropped DLLs required.
+- **`import site` in `pythonXXX._pth` is mandatory, not optional.** With a
+  `._pth` file present `site` does not run by default, and therefore no `.pth`
+  file is ever processed. `pywin32` depends on exactly that: its `pywin32.pth`
+  adds `win32\lib` to `sys.path` and runs `import pywin32_bootstrap`, which is
+  what registers `pywin32_system32` so `pywintypesNNN.dll` is findable by
+  `win32crypt.pyd`. Leave `site` disabled and the failure is a DLL-load error,
+  not a missing-module error — a much less obvious symptom.
+- **You do not need pip inside the distribution.** Install from the outside:
+
+  ```bat
+  .venv-build\Scripts\python -m pip install --target python\Lib\site-packages ^
+      --only-binary=:all: --platform win_amd64 --implementation cp ^
+      --python-version 3.13 --abi cp313 -r requirements.txt
+  ```
+
+  `pip` permits `--platform`/`--python-version`/`--implementation`/`--abi` only
+  together with `--target` (or `--dry-run`), and requires `--only-binary=:all:`.
+- **The bundled `python.exe` is Authenticode-signed** by the Python Software
+  Foundation — an embedded signature, not merely the `python.cat` catalog
+  sibling. Verify it on the *extracted* copy, because that is what a user runs.
+- **Prefer an `abi3` wheel when one exists.** `pycryptodome` publishes
+  `cp37-abi3-win_amd64`, so it installs on any CPython >= 3.7 — including
+  versions that have no version-specific wheel yet. `pywin32` ships
+  version-specific wheels (`cp313`, `cp314`, …), so it pins you harder.
+- **Size is honest.** 49.5 MiB folder / 23.3 MiB zip for this toolkit; the
+  interpreter plus OpenSSL alone is ~12 MiB. Pruning unused `.pyd`s and unused
+  `pywin32` subpackages is possible, but every deletion is a runtime risk, so
+  it should be opt-in.
+- **Quote `%~dp0` in the launcher**, because the bundle gets run from paths
+  containing spaces: `"%~dp0python\python.exe" "%~dp0python\goe.pyz" %*` needs
+  no `PATH` at all.
+
 ---
 
 ## 9. Cross-cutting concerns

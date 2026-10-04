@@ -272,28 +272,65 @@ dist\goe.exe --help
 dist\goe.exe extract --all-browsers
 ```
 
-### `.exe` or `.pyz` — which should you ship?
+### Three ways to ship it
 
-They answer different questions: the `.exe` removes the *Python* requirement, the
-`.pyz` removes the *trust* problem.
+| | `dist\goe.exe` | `dist\goe.pyz` | `dist\goe-portable\` |
+|---|---|---|---|
+| Needs Python on the target | ✅ no | ❌ yes + deps | ✅ no (ships 3.13.15) |
+| Program Windows launches | **your** unsigned binary | signed `python.exe` | signed `python.exe` |
+| Smart App Control enforced | ❌ blocked | ✅ allowed | ✅ allowed |
+| Arrived by download | ⚠️ SmartScreen "unrecognised app" | ⚠️ prompt targets `python.exe` | ⚠️ prompt targets `python.exe` |
+| Antivirus heuristics | higher — bootloader + extract to `%TEMP%` | lower | lowest — no bootloader, no extraction |
+| Start-up | ~1 s (self-extracts) | immediate | immediate |
+| Size to hand over | **12.5 MiB**, one file | 56 KiB + interpreter | **23.3 MiB** (1,872 files) |
+| Hides your code | ❌ (bytecode) | ❌ (plain zip) | ❌ (plain zip) |
 
-| | `dist\goe.exe` | `dist\goe.pyz` (`py goe.pyz`) |
-|---|---|---|
-| Target has no Python | ✅ works | ❌ needs Python + `pip install -r requirements.txt` |
-| What Windows reputation-checks | **your** unsigned binary | the **signed** `python.exe` |
-| Smart App Control enforced | ❌ blocked (unsigned, no reputation) | ✅ allowed (interpreter is signed/known) |
-| Arrived by download | ⚠️ SmartScreen "unrecognised app" prompt | ⚠️ prompt targets `python.exe`, which has reputation |
-| Antivirus heuristics | higher — bootloader + self-extract to `%TEMP%` | lower — no bootloader, no extraction |
-| Startup | ~1 s (extracts on every launch) | immediate |
-| Hides your code | ❌ (bytecode) | ❌ (plain zip) |
-
-**Rule of thumb:** if the target already has Python, `py goe.pyz` is the
-lower-friction, less-likely-to-be-blocked option — because the only image being
-trust-checked is the signed interpreter, not your artifact. Ship the `.exe` when
-"no Python installed" is the binding constraint. Neither format protects your
-source.
+**Rule of thumb.** Target already has Python → `py goe.pyz`. Target has no Python
+but you want the least trust friction → the **portable bundle**. Target has no
+Python and you must hand over exactly one file → the **`.exe`**. None of the
+three protects your source.
 
 > 📖 Full write-up: [`docs/PACKAGING_PYTHON_CLI.md` §10](docs/PACKAGING_PYTHON_CLI.md#10-windows-trust-motw-smartscreen-and-smart-app-control)
+
+---
+
+## Portable Bundle (embedded Python — no install needed)
+
+For a target with no Python where you also want the SmartScreen / Smart App
+Control advantage of launching a *signed interpreter*:
+
+```bat
+.venv-build\Scripts\python build_portable.py --clean
+:: -> dist\goe-portable\       (49.5 MiB folder)
+:: -> dist\goe-portable.zip    (23.3 MiB, for transfer)
+```
+
+```bat
+dist\goe-portable\goe.cmd --help
+dist\goe-portable\goe.cmd extract --all-browsers
+```
+
+`goe.pyz` sits inside the interpreter folder, beside `python.exe`:
+
+```
+goe-portable\
+├── goe.cmd              :: "%~dp0python\python.exe" "%~dp0python\goe.pyz" %*
+├── README.txt
+└── python\              :: Python 3.13.15 embeddable + dependencies
+    ├── python.exe        :: Authenticode-signed by the Python Software Foundation
+    ├── python313._pth    :: patched: lists Lib\site-packages, enables site
+    ├── goe.pyz
+    └── Lib\site-packages\
+```
+
+Pinned to **Python 3.13.15** to match the dev venv, so the cp313 wheels are the
+exact ones already proven here. `build_portable.py` does the whole sequence —
+download, extract, `pip install --target`, patch `._pth`, copy, zip, self-test —
+so the bundle is reproducible rather than hand-assembled. Nothing is pruned, by
+design, so there is spare capacity for future needs.
+
+> This is deliberately **not** a `--onedir` PyInstaller build: that still ships
+> an unsigned executable, which is the exact thing this option exists to avoid.
 
 ---
 
